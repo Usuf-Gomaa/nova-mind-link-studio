@@ -1,0 +1,2 @@
+CREATE TABLE profile (id INTEGER PRIMARY KEY CHECK (id = 1), body TEXT NOT NULL);
+CREATE TABLE auth_attempts (ip_hash TEXT PRIMARY KEY, attempts INTEGER NOT NULL, window_start INTEGER NOT NULL);

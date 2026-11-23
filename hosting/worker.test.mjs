@@ -1,0 +1,32 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import worker,{sessionCookie,authorized} from './worker.mjs';
+test('signed sessions resist forgery and expire when the password changes',async()=>{
+ const env={ADMIN_PASSWORD:'test-only-not-a-production-password'};
+ const cookie=await sessionCookie(env.ADMIN_PASSWORD);
+ assert.match(cookie,/HttpOnly; Secure; SameSite=Strict/);
+ const request=new Request('https://example.com/admin',{headers:{cookie}});
+ assert.equal(await authorized(request,env),true);
+ assert.equal(await authorized(request,{ADMIN_PASSWORD:'different-password'}),false);
+ assert.equal(await authorized(new Request('https://example.com/admin'),env),false);
+ assert.equal(await authorized(new Request('https://example.com/admin',{headers:{cookie:cookie.replace(/.$/,'x').replace(/nova_session=./,'nova_session=0')}}),env),false);
+});
+test('visitors can read links; writes and dashboard require login; CSRF is rejected',async()=>{
+ let stored=null,attempts=0;
+ const DB={prepare(sql){return {bind(...args){this.args=args;return this},async first(){if(sql.startsWith('INSERT INTO auth_attempts'))return {attempts:++attempts};return stored?{body:stored}:null},async run(){if(sql.startsWith('INSERT INTO profile'))stored=this.args[0];if(sql.startsWith('DELETE FROM auth_attempts'))attempts=0;return {success:true}}}}};
+ const env={DB,ADMIN_PASSWORD:'test-only-not-a-production-password',ASSETS:{fetch:()=>new Response('app')}};
+ const req=(path,method='GET',body,cookie,origin='https://example.com')=>new Request('https://example.com'+path,{method,headers:{'Content-Type':'application/json',origin,...(cookie?{cookie}:{})},...(body?{body:JSON.stringify(body)}:{})});
+ assert.equal((await worker.fetch(req('/admin'),env)).status,302);
+ assert.equal((await worker.fetch(req('/api/profile','PUT',{}),env)).status,401);
+ assert.equal((await worker.fetch(req('/api/login','POST',{password:env.ADMIN_PASSWORD},null,'https://evil.example'),env)).status,403);
+ assert.equal((await worker.fetch(req('/api/login','POST',{password:'incorrect'}),env)).status,401);
+ const login=await worker.fetch(req('/api/login','POST',{password:env.ADMIN_PASSWORD}),env);assert.equal(login.status,200);
+ const cookie=login.headers.get('Set-Cookie');assert.ok(cookie);
+ assert.equal((await worker.fetch(req('/admin','GET',null,cookie),env)).status,200);
+ const profile={name:'Test',description:'',logo:'./logo.jpeg',color:'#233b83',style:'square',links:[{id:'one',type:'website',label:'Website',url:'https://example.com',enabled:true}]};
+ assert.equal((await worker.fetch(req('/api/profile','PUT',profile,cookie),env)).status,200);
+ assert.deepEqual(await (await worker.fetch(req('/api/profile'),env)).json(),profile);
+ assert.equal((await worker.fetch(req('/api/profile','PUT',{...profile,links:[{...profile.links[0],url:'javascript:alert(1)'}]},cookie),env)).status,400);
+ attempts=10;assert.equal((await worker.fetch(req('/api/login','POST',{password:'incorrect'}),env)).status,429);
+ const logout=await worker.fetch(req('/api/logout','POST',{},cookie),env);assert.match(logout.headers.get('Set-Cookie'),/Max-Age=0/);
+});
